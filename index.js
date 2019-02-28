@@ -15,7 +15,7 @@ module.exports = function swaggerGenerator(sails) {
       });
     }
   };
-
+  
   function init() {
     // getting global object if defined
     if (sails.config.swaggerConfig) {
@@ -36,7 +36,8 @@ module.exports = function swaggerGenerator(sails) {
       if (routeList.hasOwnProperty(key)) {
         let methodType = key.split(/ (.+)/)[0].toLowerCase();
         let routeUrl = key.split(/ (.+)/)[1];
-
+	if (routeUrl) { routeUrl = routeUrl.trimLeft() }
+	
         // if route has path params
         let pathInputs = [];
         let objUrl = {};
@@ -48,12 +49,80 @@ module.exports = function swaggerGenerator(sails) {
         //
 
         if (routeList[key].controller && routeList[key].swagger) {
-          console.log(routeList[key].swagger, routeUrl, methodType);
+        
           let tempObj = {
             [methodType]: routeList[key].swagger
           }
           swagger.paths[routeUrl] = tempObj;
 
+	} else if (routeList[key].indexOf && routeList[key].indexOf('Controller.' > -1)) {
+	  const controllerName = routeList[key].slice(0, routeList[key].indexOf('.'))
+	  const action = routeList[key].slice(routeList[key].indexOf('.') + 1)
+	  const filePathToRead = controllerPath + '/' + controllerName
+	  
+	  let controller
+	  try {
+	    controller = require(filePathToRead)
+	  }
+	  catch (err) {
+	    continue
+	  }
+	  
+	  objUrl.methodType = methodType
+	  objUrl.actionInputs = controller[action].inputs ? controller[action].inputs : []
+	  objUrl.tag = controllerName
+	  objUrl.summary = controller[action].description
+	  objUrl.consumes = objUrl.actionInputs[0] ? ['application/json'] : []
+	  objUrl.produces = ['application/json']
+	  objUrl.responses = formatExits(controller[action].exits)
+	  
+	  //objUrl.security = controller[action].security
+
+	  if (swagger.paths[routeUrl]) {
+	    swagger.paths[routeUrl] = { ...swagger.paths[routeUrl], ...generatePath(objUrl) }
+	  } else {
+	    swagger.paths[routeUrl] = generatePath(objUrl)
+	  }
+	  
+	  
+	} else if (routeList[key].controller && routeList[key].action) {
+	  let controllerName = routeList[key].controller
+	  
+	  if (controllerName.indexOf('Controller') < 0) {
+	    controllerName =
+		  controllerName.charAt(0).toUpperCase() +
+		  controllerName.slice(1) +
+		  'Controller'
+	  }
+
+	  const filePathToRead = controllerPath + '/' + controllerName
+	  
+	  let controller
+	  try {
+	    controller = require(filePathToRead)
+	  }
+	  catch (err) {
+	    continue
+	  }
+	  
+	  const action = routeList[key].action
+
+	  objUrl.methodType = methodType
+	  objUrl.actionInputs = controller[action].inputs ? controller[action].inputs : []
+	  objUrl.tag = controllerName
+	  objUrl.summary = controller[action].description
+	  objUrl.consumes = objUrl.actionInputs[0] ? ['application/json'] : []
+	  objUrl.produces = ['application/json']
+	  objUrl.responses = formatExits(controller[action].exits)
+	  //objUrl.security = controller[action].security
+
+	  if (swagger.paths[routeUrl]) {
+	    swagger.paths[routeUrl] = { ...swagger.paths[routeUrl], ...generatePath(objUrl) }
+	  } else {
+	    swagger.paths[routeUrl] = generatePath(objUrl)
+	  }
+
+	  
         } else if (!routeList[key].controller && routeList[key].action) {
           let filePathToRead = controllerPath + "/" + routeList[key].action;
           let actionInputs = getInputs(filePathToRead);
@@ -63,7 +132,7 @@ module.exports = function swaggerGenerator(sails) {
           //   TODO:
           let summary = routeList[key].description ? routeList[key].description : '';
           //
-
+	  
           if (methodType && routeUrl && tags && tags.length > 0) {
             let tag = tags[0];
 
@@ -84,14 +153,31 @@ module.exports = function swaggerGenerator(sails) {
               objUrl = setDataFromRouteObj(routeList[key].swagger.urlData, objUrl);
             }
             swagger.paths[routeUrl] = generatePath(objUrl);
+	 
           }
         }
       }
     }
-    swagger.definitions = generateDefinitions();
+    swagger.components.schemas = generateDefinitions();
     generateFile(swagger);
   }
 
+  function formatExits(exits) {
+    const obj = {}
+    for (key in exits) {
+      if (exits.hasOwnProperty(key)) {
+	const code = exits[key].statusCode
+	if (code) {
+	  obj[code] = exits[key]
+	} else {
+	  obj[key] = exits[key]
+	}
+      }
+    }
+
+    return obj
+  }
+  
   function setDataFromRouteObj(urlData, objUrl) {
     if (urlData.tag) {
       objUrl.tag = urlData.tag;
@@ -137,36 +223,58 @@ module.exports = function swaggerGenerator(sails) {
     return objUrl;
   }
 
+  function parseBodySchema(schema) {
+    // schema is the type object defined in Controller.action.inputs[param].type
+    if (typeof schema === 'string') {
+      return {
+	type: schema
+      }
+    } else if (Array.isArray(schema)) {
+      return {
+	type: 'array',
+	items: parseBodySchema(schema[0])
+      }
+    } else if (typeof schema === 'object') {
+      const obj = {
+	type: 'object',
+	properties: {}
+      }
+
+      for (key in schema) {
+	
+	if (schema.hasOwnProperty(key)) {
+	  obj.properties[key] = parseBodySchema(schema[key])
+	}
+      }
+
+      return obj
+    }
+  }
+  
   function generatePath(objUrl) {
     // get only the first instance of our space splitting
-    let params = [];
-    let obj;
+    let params = {};
+    let obj = {};
 
-    let pathInputs = [];
+    const pathInputs = {}
+    const actionInputs = objUrl.actionInputs ? objUrl.actionInputs : {}
     if (objUrl.pathInputs && objUrl.pathInputs.length) {
       for (let i = 0; i < objUrl.pathInputs.length; i++) {
-        for (const key in objUrl.actionInputs) {
-          if (objUrl.actionInputs.hasOwnProperty(key)) {
+        for (const key in actionInputs) {
+          if (actionInputs.hasOwnProperty(key)) {
             if (key == objUrl.pathInputs[i]) {
-              pathInputs.push({
-                [key]: objUrl.actionInputs[key]
-              });
-              delete objUrl.actionInputs[key];
-            }
+              pathInputs[key] = actionInputs[key]
+	      hasPathInputs = true
+	      delete actionInputs[key]
+	    }
           }
         }
       }
     }
 
-    pathInputs = Object.assign({}, ...pathInputs);
-    params = generatePathData(pathInputs, 'path');
-    if (objUrl.methodType == "post" || objUrl.methodType == "put") {
-      obj = generateBodyData(objUrl.actionInputs);
-      params.push(obj);
-    } else {
-      params = generatePathData(objUrl.actionInputs, 'query');
-    }
-
+    //pathInputs = Object.assign({}, ...pathInputs);
+    //params = generatePathData(pathInputs, 'path');
+    
     let path = {
       [objUrl.methodType]: {
         tags: [objUrl.tag],
@@ -178,9 +286,24 @@ module.exports = function swaggerGenerator(sails) {
       }
     };
 
-    if (params.length > 0 && params[0] != null) {
-      path[objUrl.methodType].parameters = params;
+    if (Object.keys(actionInputs).length > 0) {
+      path[objUrl.methodType].requestBody = generateBodyData(actionInputs)
     }
+
+    if (Object.keys(pathInputs).length > 0) {
+      path[objUrl.methodType].parameters = generatePathData(pathInputs, 'path')
+    }
+    
+    //if (objUrl.methodType == "post" || objUrl.methodType == "put") {
+    //  obj = generateBodyData(objUrl.actionInputs);
+      //params.push(obj);
+    //} else {
+    //  params = generatePathData(objUrl.actionInputs, 'query');
+    //}
+
+    //if (params.length > 0 && params[0] != null) {
+    //  path[objUrl.methodType].parameters = params;
+    //}
     return path;
   }
 
@@ -192,7 +315,9 @@ module.exports = function swaggerGenerator(sails) {
           "in": type,
           name: key,
           required: actionInputs[key].required ? actionInputs[key].required : false,
-          type: actionInputs[key].type ? actionInputs[key].type : '',
+          schema: {
+	    type: actionInputs[key].type ? actionInputs[key].type : ''
+	  },
           description: actionInputs[key].description ? actionInputs[key].description : ''
         };
         obj.push(tempObj);
@@ -202,27 +327,58 @@ module.exports = function swaggerGenerator(sails) {
   }
 
   function generateBodyData(actionInputs) {
-    let obj = {
-      name: "body",
-      in: "body",
+/*    let obj = {
+      //name: "body",
+      //in: "body",
       required: true,
       description: "An object defining our schema for this request",
-      schema: {
-        properties: {},
-        required: []
+      content: {
+	'application/json': {
+	  schema: {
+            properties: {},
+            required: []
+	  }
+	}
       }
     };
     for (const key in actionInputs) {
       if (actionInputs.hasOwnProperty(key)) {
-        obj.schema.properties[key] = {
-          type: actionInputs[key].type
+        obj.content['application/json'].schema.properties[key] = {
+          type: actionInputs[key].type,
+	  description: actionInputs[key].description
         };
+
+	if (Array.isArray(actionInputs[key].type)) {
+	  obj.content['application/json'].schema.properties[key].type = 'array'
+	  obj.content['application/json'].schema.properties[key].items = {
+	    type: actionInputs[key].type[0]
+	  }
+	}
         if (actionInputs[key].required) {
-          obj.schema.required.push(key);
+          obj.content['application/json'].schema.required.push(key);
         }
       }
     }
-    return obj;
+    return obj;*/
+    const schema_obj = {}
+    for (key in actionInputs) {
+      if (actionInputs.hasOwnProperty(key)) {
+	schema_obj[key] = parseBodySchema(actionInputs[key].type)
+      }
+    }
+    
+    return {
+      required: true,
+      description: 'An object defining our schema for this request',
+      content: {
+	'application/json': {
+	  schema: {
+	    type: 'object',
+	    properties: schema_obj
+	  }
+	}
+      }
+    }
   }
 
   function generateDefinitions() {
@@ -260,7 +416,6 @@ module.exports = function swaggerGenerator(sails) {
 
         if (!fs.existsSync(tempPath)) {
           var oldmask = process.umask(0);
-          console.log(tempPath);
           //   fs.mkdirSync(path, { recursive: true })
           fs.mkdir(tempPath, '0755', function (err) {
             process.umask(oldmask);
